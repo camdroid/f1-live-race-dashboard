@@ -10,49 +10,39 @@
 # Example: ./start_live.sh LEC Monaco 2026
 
 set -euo pipefail
-cd "$(dirname "$0")"
-
-DRIVER="${1:-VER}"
-ROUND="${2:-Monaco}"
-YEAR="${3:-2026}"
-
-PYTHON="$(pwd)/.venv/bin/python"
-FASTF1="$HOME/projects/fastf1"
-OPW="$HOME/projects/open-pit-wall"
-REPLAY="$HOME/projects/f1-race-replay"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$DIR/.venv/bin/python"
+OPW="$DIR/vendor/open-pit-wall"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "ERROR: venv not found. Run ./setup.sh first." >&2
   exit 1
 fi
 
+DRIVER="${1:-VER}"
+ROUND="${2:-Monaco}"
+YEAR="${3:-2026}"
+
 screen -S f1live -X quit 2>/dev/null || true
 sleep 0.3
 
-# 1. Live OPW bridge in screen (logs connection status; no interaction needed)
+# 1. Live OPW bridge in screen
 echo "Starting live OPW bridge in screen session 'f1live'..."
 screen -dmS f1live bash -c "
-  cd '$FASTF1'
+  cd '$DIR'
   '$PYTHON' live_opw_bridge.py --record live_session.txt
   echo '--- bridge exited (press enter) ---'
   read -r _
 "
 
-# 2. Wait for bridge to bind port 8765
-echo "Waiting for bridge..."
-for i in $(seq 1 40); do
-  nc -z 127.0.0.1 8765 2>/dev/null && { echo "  Ready (${i}00ms)"; break; }
-  sleep 0.1
-done
-
-# 3. Telemetry trace
+# 2. Telemetry trace (OPW example, from submodule) — retries automatically
 echo "Starting telemetry trace for $DRIVER..."
 "$PYTHON" "$OPW/examples/driver-telemetry-trace/main.py" --driver "$DRIVER" &
 TRACE_PID=$!
 
-# 4. Track map
+# 3. Track map — retries connection automatically
 echo "Starting track map ($ROUND $YEAR)..."
-(cd "$REPLAY" && "$PYTHON" opw_track_map.py --round "$ROUND" --year "$YEAR") &
+"$PYTHON" "$DIR/opw_track_map.py" --round "$ROUND" --year "$YEAR" &
 MAP_PID=$!
 
 cat <<EOF
@@ -63,7 +53,7 @@ cat <<EOF
   Telemetry trace : $DRIVER  (PID $TRACE_PID)
   Track map       : $ROUND $YEAR  (PID $MAP_PID)
   Live bridge     : screen session 'f1live'
-  Recording to    : $FASTF1/live_session.txt
+  Recording to    : $DIR/live_session.txt
 
   Detach from screen : Ctrl-A D
   Reattach           : screen -r f1live

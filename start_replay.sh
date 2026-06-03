@@ -10,27 +10,24 @@
 # Example: ./start_replay.sh LEC Monaco 2026
 
 set -euo pipefail
-cd "$(dirname "$0")"
-
-DRIVER="${1:-VER}"
-ROUND="${2:-Canadian Grand Prix}"
-YEAR="${3:-2026}"
-
-PYTHON="$(pwd)/.venv/bin/python"
-FASTF1="$HOME/projects/fastf1"
-OPW="$HOME/projects/open-pit-wall"
-REPLAY="$HOME/projects/f1-race-replay"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$DIR/.venv/bin/python"
+OPW="$DIR/vendor/open-pit-wall"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "ERROR: venv not found. Run ./setup.sh first." >&2
   exit 1
 fi
 
+DRIVER="${1:-VER}"
+ROUND="${2:-Canadian Grand Prix}"
+YEAR="${3:-2026}"
+
 # Kill any leftover session
 screen -S opw -X quit 2>/dev/null || true
 sleep 0.3
 
-# 1. OPW broadcaster in screen (interactive — type 'play' to start)
+# 1. OPW broadcaster in screen (interactive — navigate menu, then type 'play')
 echo "Starting OPW broadcaster in screen session 'opw'..."
 screen -dmS opw bash -c "
   cd '$OPW'
@@ -39,14 +36,14 @@ screen -dmS opw bash -c "
   read -r _
 "
 
-# 2. Telemetry trace (matplotlib window)
+# 2. Telemetry trace (OPW example, from submodule) — retries automatically
 echo "Starting telemetry trace for $DRIVER..."
 "$PYTHON" "$OPW/examples/driver-telemetry-trace/main.py" --driver "$DRIVER" &
 TRACE_PID=$!
 
-# 3. Track map (PySide6 window) — must cd into f1-race-replay for src.* imports
+# 3. Track map — retries connection automatically
 echo "Starting track map ($ROUND $YEAR)..."
-(cd "$REPLAY" && "$PYTHON" opw_track_map.py --round "$ROUND" --year "$YEAR") &
+"$PYTHON" "$DIR/opw_track_map.py" --round "$ROUND" --year "$YEAR" &
 MAP_PID=$!
 
 cat <<EOF
@@ -58,12 +55,13 @@ cat <<EOF
   Track map       : $ROUND $YEAR  (PID $MAP_PID)
   Broadcaster     : screen session 'opw'
 
-  Broadcaster controls (inside screen):
-    play / pause / speed <n> / quit
+  Navigate the OPW menu to select a session, then
+  choose "Play saved data" — dashboards connect automatically.
 
-  Detach from screen : Ctrl-A D
-  Reattach           : screen -r opw
-  Kill everything    : screen -S opw -X quit && kill $TRACE_PID $MAP_PID
+  Broadcaster controls: play / pause / speed <n> / quit
+  Detach from screen  : Ctrl-A D
+  Reattach            : screen -r opw
+  Kill everything     : screen -S opw -X quit && kill $TRACE_PID $MAP_PID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 EOF

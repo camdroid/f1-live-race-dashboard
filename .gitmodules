@@ -1,0 +1,6 @@
+[submodule "vendor/open-pit-wall"]
+	path = vendor/open-pit-wall
+	url = https://github.com/IAmTomShaw/open-pit-wall
+[submodule "vendor/f1-race-replay"]
+	path = vendor/f1-race-replay
+	url = https://github.com/IAmTomShaw/f1-race-replay
