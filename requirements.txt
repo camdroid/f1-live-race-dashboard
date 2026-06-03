@@ -1,0 +1,11 @@
+fastf1
+rich
+websockets
+signalrcore
+PySide6
+matplotlib
+pandas
+numpy
+scipy
+questionary
+requests
