@@ -20,6 +20,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import threading
 import time
 import zlib
@@ -68,6 +69,92 @@ OPW_CHANNELS = {
 
 
 # ---------------------------------------------------------------------------
+# Race control / penalty parsing
+# ---------------------------------------------------------------------------
+_CAR_RE = re.compile(r"CAR (\d+)\s*\(([A-Z0-9]{2,3})\)")
+_TRAIL_TS_RE = re.compile(r"\s*\(?\d{1,2}:\d{2}:\d{2}\)?\s*$")
+_TRAIL_LAP_RE = re.compile(r"\s*LAP \d+\s*$", re.I)
+
+# Ordered: first match wins. (regex, label) — label describes the penalty.
+_PENALTY_PATTERNS = [
+    (re.compile(r"(\d+)\s*SECOND TIME PENALTY"), lambda m: f"{m.group(1)}-second time penalty"),
+    (re.compile(r"DRIVE.?THROUGH PENALTY"),      lambda m: "drive-through penalty"),
+    (re.compile(r"STOP(?:\s*/\s*|\s+AND\s+)GO"),  lambda m: "stop-and-go penalty"),
+    (re.compile(r"(\d+)\s*(?:GRID )?PLACE.? GRID PENALTY"), lambda m: f"{m.group(1)}-place grid penalty"),
+    (re.compile(r"GRID PENALTY"),                lambda m: "grid penalty"),
+    (re.compile(r"DISQUALIFIED|EXCLUDED"),       lambda m: "DISQUALIFIED"),
+    (re.compile(r"BLACK AND WHITE FLAG"),        lambda m: "black-and-white (warning) flag"),
+]
+
+
+def _clean_reason(message: str) -> str:
+    """Extract the reason (text after the last ' - '), trimmed and lowercased."""
+    reason = message.rsplit(" - ", 1)[-1] if " - " in message else message
+    # Strip trailing "... LAP 51 16:11:28" style cruft, in either order.
+    for _ in range(2):
+        reason = _TRAIL_TS_RE.sub("", reason).strip()
+        reason = _TRAIL_LAP_RE.sub("", reason).strip()
+    return reason.lower()
+
+
+def _driver_label(num: str, tla: str, driver_info: dict) -> str:
+    """Friendly 'Surname (TLA)' if we have a name, else just '(TLA)'."""
+    info = driver_info.get(num, {})
+    name = (info.get("LastName") or info.get("FullName")
+            or info.get("BroadcastName") or "")
+    name = str(name).strip().title()
+    if name:
+        return f"{name} ({tla})"
+    return tla
+
+
+def describe_race_control_event(msg: dict, driver_info: dict) -> str | None:
+    """
+    Turn a race-control message into a human-readable penalty/steward line,
+    or return None if it isn't noteworthy.
+    """
+    message = str(msg.get("Message", "")).strip()
+    if not message:
+        return None
+
+    upper = message.upper()
+    lap = msg.get("Lap")
+    lap_str = f"  [Lap {lap}]" if lap else ""
+
+    car = _CAR_RE.search(upper)
+    who = _driver_label(car.group(1), car.group(2), driver_info) if car else ""
+    reason = _clean_reason(message)
+
+    # Skip the verbose "REVIEWED NO FURTHER" unless it's a notable closure
+    if "NO FURTHER INVESTIGATION" in upper or "NO FURTHER ACTION" in upper:
+        return f"✅ No further action — {who}: {reason}{lap_str}" if who else None
+
+    # Actual penalty verdicts (highest priority)
+    for pattern, render in _PENALTY_PATTERNS:
+        m = pattern.search(upper)
+        if m:
+            penalty = render(m)
+            return f"🚨 PENALTY — {who}: {penalty} for {reason}{lap_str}"
+
+    # Lap time deleted
+    if "DELETED" in upper:
+        # e.g. "CAR 11 (PER) TIME 1:22.941 DELETED - TRACK LIMITS AT TURN 10"
+        t = re.search(r"TIME\s+([\d:.]+)", upper)
+        lap_time = f" ({t.group(1)})" if t else ""
+        return f"⏱  Lap time deleted — {who}{lap_time}: {reason}{lap_str}"
+
+    # Under investigation
+    if "UNDER INVESTIGATION" in upper:
+        return f"🔍 Under investigation — {who}: {reason}{lap_str}"
+
+    # Noted by stewards
+    if "NOTED" in upper:
+        return f"📝 Noted — {who}: {reason}{lap_str}"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Shared live state
 # ---------------------------------------------------------------------------
 class LiveState:
@@ -91,6 +178,7 @@ class LiveState:
         self.lap_count: dict = {}
         self.weather: dict = {}
         self.race_control: list[dict] = []
+        self._seen_rc: set[str] = set()  # de-dupe race-control announcements
 
         self.session_start_utc: str = datetime.now(timezone.utc).isoformat()
 
@@ -190,10 +278,19 @@ class LiveState:
             messages = list(messages.values())
         with self._lock:
             for msg in messages:
-                if isinstance(msg, dict):
-                    self.race_control.append(msg)
-                    if len(self.race_control) > 50:
-                        self.race_control.pop(0)
+                if not isinstance(msg, dict):
+                    continue
+                self.race_control.append(msg)
+                if len(self.race_control) > 50:
+                    self.race_control.pop(0)
+
+                # Announce noteworthy steward actions once each.
+                key = str(msg.get("Message", ""))
+                if key and key not in self._seen_rc:
+                    self._seen_rc.add(key)
+                    line = describe_race_control_event(msg, self.driver_info)
+                    if line:
+                        log.info(line)
 
     def snapshot(self) -> dict:
         """Return a point-in-time copy of all state."""
