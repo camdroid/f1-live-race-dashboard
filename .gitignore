@@ -3,5 +3,7 @@ env/
 __pycache__/
 *.pyc
 cache/
+.fastf1-cache/
+recordings/
 *.txt.bak
 live_session.txt

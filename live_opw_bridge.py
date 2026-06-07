@@ -151,11 +151,23 @@ class LiveState:
                         self.positions[num] = int(pos)
 
     def apply_timing_app(self, data: dict):
+        lines = data.get("Lines", {})
+        if not isinstance(lines, dict):
+            return
         with self._lock:
-            for num, info in data.get("Lines", {}).items():
-                stints = info.get("Stints", {})
-                if stints:
+            for num, info in lines.items():
+                if not isinstance(info, dict):
+                    continue
+                stints = info.get("Stints")
+                # Stints is a list in delta updates, a dict (keyed by index)
+                # in the initial snapshot. Take the most recent either way.
+                if isinstance(stints, dict) and stints:
                     latest = stints[max(stints.keys(), key=int)]
+                elif isinstance(stints, list) and stints:
+                    latest = stints[-1]
+                else:
+                    continue
+                if isinstance(latest, dict):
                     self.stints[num] = latest
 
     def apply_weather(self, data: dict):
@@ -171,8 +183,13 @@ class LiveState:
             self.lap_count.update(data)
 
     def apply_race_control(self, data: dict):
+        # "Messages" arrives as a dict (keyed by index) in delta updates,
+        # but as a list in the initial snapshot. Handle both.
+        messages = data.get("Messages", {})
+        if isinstance(messages, dict):
+            messages = list(messages.values())
         with self._lock:
-            for msg in data.get("Messages", {}).values():
+            for msg in messages:
                 if isinstance(msg, dict):
                     self.race_control.append(msg)
                     if len(self.race_control) > 50:
@@ -258,14 +275,14 @@ class LiveF1Client:
             for topic, data in (msg.result or {}).items():
                 if isinstance(data, str):
                     data = _decode_compressed(data) or data
-                self._parse_message(topic, data)
+                self._safe_parse(topic, data)
 
         elif isinstance(msg, list) and len(msg) >= 2:
             topic = msg[0]
             raw = msg[1]
             # CarData.z and Position.z arrive as compressed strings
             if topic in ("CarData.z", "Position.z"):
-                self._parse_message(topic, raw)
+                self._safe_parse(topic, raw)
             else:
                 if isinstance(raw, str):
                     try:
@@ -276,7 +293,14 @@ class LiveF1Client:
                         )
                     except (json.JSONDecodeError, ValueError):
                         pass
-                self._parse_message(topic, raw)
+                self._safe_parse(topic, raw)
+
+    def _safe_parse(self, topic, data):
+        # A single malformed message must never tear down the feed.
+        try:
+            self._parse_message(topic, data)
+        except Exception:
+            log.warning(f"Skipped malformed '{topic}' message", exc_info=False)
 
     def start(self):
         if self.record_file:
@@ -333,8 +357,10 @@ def _build_driver_payload(num: str, snap: dict) -> dict | None:
     info = snap["driver_info"].get(num, {})
     stint = snap["stints"].get(num, {})
 
-    # Need at minimum an x/y position to be meaningful
-    if "x" not in t and "y" not in t:
+    # Emit a payload as long as we have *any* telemetry for this driver.
+    # Position (x/y) and car data (speed/gear) arrive on separate streams;
+    # don't gate car telemetry on position, which may be absent.
+    if not t:
         return None
 
     compound = TYRE_COMPOUND_MAP.get(
@@ -389,8 +415,17 @@ def _build_weather(snap: dict) -> dict | None:
     }
 
 
+_STREAM_START = None  # monotonic clock anchor for elapsed_seconds
+
+
 def _build_frames(snap: dict) -> dict[str, Any]:
     """Build one set of OPW channel messages from a state snapshot."""
+    global _STREAM_START
+    now = time.monotonic()
+    if _STREAM_START is None:
+        _STREAM_START = now
+    elapsed = now - _STREAM_START
+
     timestamp = _now_iso()
     current_lap = snap["lap_count"].get("CurrentLap", 0)
 
@@ -428,7 +463,7 @@ def _build_frames(snap: dict) -> dict[str, Any]:
         "event": "telemetry.lap",
         "payload": {
             "current_lap": current_lap,
-            "elapsed_seconds": 0.0,
+            "elapsed_seconds": round(elapsed, 3),
         },
     }
 

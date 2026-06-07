@@ -27,6 +27,7 @@ import os
 import sys
 import threading
 
+import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -61,7 +62,7 @@ _PALETTE = [
 class OPWClient(QObject):
     """Connects to the OPW WebSocket and emits signals with parsed data."""
 
-    positions_updated = Signal(dict, dict, str)   # positions, colors, leader
+    positions_updated = Signal(dict, dict, str)   # {code: (x, y)}, colors, leader
     status_changed = Signal(str)
     welcome_received = Signal(dict)
 
@@ -111,7 +112,7 @@ class OPWClient(QObject):
                 "channels": ["telemetry.drivers", "leaderboard", "telemetry.lap"],
             }))
 
-            driver_fracs: dict[str, float] = {}
+            driver_xy: dict[str, tuple] = {}
             leader_code: str | None = None
 
             async for raw in ws:
@@ -130,9 +131,10 @@ class OPWClient(QObject):
                         if not code:
                             continue
                         pos = entry.get("position", {})
-                        frac = pos.get("dist_percentage_around_track")
-                        if frac is not None:
-                            driver_fracs[code] = float(frac)
+                        x = pos.get("x")
+                        y = pos.get("y")
+                        if x is not None and y is not None:
+                            driver_xy[code] = (float(x), float(y))
                             self._ensure_color(code)
 
                 elif event == "leaderboard":
@@ -140,9 +142,9 @@ class OPWClient(QObject):
                     if drivers:
                         leader_code = drivers[0].get("driver_code")
 
-                if driver_fracs:
+                if driver_xy:
                     self.positions_updated.emit(
-                        dict(driver_fracs),
+                        dict(driver_xy),
                         dict(self._colors),
                         leader_code or "",
                     )
@@ -162,55 +164,74 @@ def load_circuit_geometry(year: int, round_name: str, session_type: str,
     Load circuit layout from FastF1 in a background thread, then call
     callback(x_c, y_c, x_i, y_i, x_o, y_o, rotation_deg, circuit_length_m).
     """
+    def _load_one(fastf1, np, yr, sess):
+        """Load circuit outline from one session. Raises if no telemetry."""
+        session = fastf1.get_session(yr, round_name, sess)
+        session.load(telemetry=True, laps=True, weather=False, messages=False)
+
+        fastest = session.laps.pick_fastest()
+        tel = fastest.get_telemetry()
+
+        x = tel["X"].tolist()
+        y = tel["Y"].tolist()
+        if len(x) < 3:
+            raise ValueError("no position telemetry")
+
+        # Build inner/outer edges by offsetting the centre line perpendicular
+        track_width = 150  # ~15 m in 1/10 metre units
+        x_inner, y_inner, x_outer, y_outer = [], [], [], []
+        n = len(x)
+        for i in range(n):
+            prev_i = (i - 1) % n
+            next_i = (i + 1) % n
+            tx = x[next_i] - x[prev_i]
+            ty = y[next_i] - y[prev_i]
+            tlen = math.hypot(tx, ty) or 1.0
+            nx_v = -ty / tlen * track_width
+            ny_v = tx / tlen * track_width
+            x_inner.append(x[i] + nx_v)
+            y_inner.append(y[i] + ny_v)
+            x_outer.append(x[i] - nx_v)
+            y_outer.append(y[i] - ny_v)
+
+        diffs = np.sqrt(np.diff(tel["X"].values) ** 2 + np.diff(tel["Y"].values) ** 2)
+        circuit_length_m = float(diffs.sum()) * 0.1  # 1/10 metre units → metres
+
+        return x, y, x_inner, y_inner, x_outer, y_outer, circuit_length_m
+
     def _load():
-        try:
-            import os
-            import fastf1
-            import numpy as np
+        import os
+        import fastf1
+        import numpy as np
 
-            cache_dir = os.path.join(os.path.dirname(__file__), ".fastf1-cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            fastf1.Cache.enable_cache(cache_dir)
+        cache_dir = os.path.join(os.path.dirname(__file__), ".fastf1-cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        fastf1.Cache.enable_cache(cache_dir)
 
-            session = fastf1.get_session(year, round_name, session_type)
-            session.load(telemetry=True, laps=True, weather=False, messages=False)
+        # The live race isn't in the historical API yet, so fall back to the
+        # same circuit from earlier sessions/years. The layout is identical.
+        candidates = [
+            (year, session_type),
+            (year, "Q"),
+            (year - 1, "R"),
+            (year - 1, "Q"),
+            (year - 2, "R"),
+        ]
+        for yr, sess in candidates:
+            try:
+                geom = _load_one(fastf1, np, yr, sess)
+            except Exception as e:
+                print(f"[geometry] {yr} {round_name} {sess}: {e}")
+                continue
+            if (yr, sess) != (year, session_type):
+                print(f"[geometry] Using {yr} {round_name} {sess} layout "
+                      f"(live session not yet in historical API)")
+            x, y, xi, yi, xo, yo, length = geom
+            callback(x, y, xi, yi, xo, yo, rotation_deg, length)
+            return
 
-            # Use the fastest lap's telemetry for the circuit outline
-            fastest = session.laps.pick_fastest()
-            tel = fastest.get_telemetry()
-
-            x = tel["X"].tolist()
-            y = tel["Y"].tolist()
-
-            # Compute a simple track width estimate from the data
-            # Build inner/outer by offsetting the center line perpendicular
-            track_width = 150  # ~15 m in 1/10 metre units
-
-            x_inner, y_inner, x_outer, y_outer = [], [], [], []
-            n = len(x)
-            for i in range(n):
-                # Tangent vector
-                prev_i = (i - 1) % n
-                next_i = (i + 1) % n
-                tx = x[next_i] - x[prev_i]
-                ty = y[next_i] - y[prev_i]
-                tlen = math.hypot(tx, ty) or 1.0
-                # Normal (perpendicular)
-                nx_v = -ty / tlen * track_width
-                ny_v = tx / tlen * track_width
-                x_inner.append(x[i] + nx_v)
-                y_inner.append(y[i] + ny_v)
-                x_outer.append(x[i] - nx_v)
-                y_outer.append(y[i] - ny_v)
-
-            # Circuit length from cumulative distance
-            diffs = np.sqrt(np.diff(tel["X"].values) ** 2 + np.diff(tel["Y"].values) ** 2)
-            circuit_length_m = float(diffs.sum()) * 0.1  # 1/10 metre units → metres
-
-            callback(x, y, x_inner, y_inner, x_outer, y_outer,
-                     rotation_deg, circuit_length_m)
-        except Exception as e:
-            print(f"[geometry] Failed to load circuit: {e}")
+        print("[geometry] Failed to load circuit from any session — "
+              "track map will use the circular schematic.")
 
     threading.Thread(target=_load, daemon=True).start()
 
@@ -230,6 +251,12 @@ class OPWTrackMapWindow(QMainWindow):
         self.setStyleSheet("background: #1a1a1a; color: #cccccc;")
 
         self._circuit_length_m: float | None = None
+
+        # Projection table (metre-space centerline) for mapping live X/Y → lap
+        # fraction. Built when geometry loads.
+        self._proj_x = None
+        self._proj_y = None
+        self._proj_frac = None
 
         self._setup_ui()
 
@@ -323,9 +350,25 @@ class OPWTrackMapWindow(QMainWindow):
         self._circuit_length_m = circuit_length_m
         self._circuit_len_label.setText(f"Circuit: {circuit_length_m:.0f} m")
         self._map.set_track_geometry(x_c, y_c, x_i, y_i, x_o, y_o, rotation_deg)
+
+        # Build the projection table in metre-space. The centerline X/Y are in
+        # 1/10-metre units (FastF1 telemetry); the live feed gives metres, so
+        # scale the centerline to match.
+        self._proj_x = np.array(x_c, dtype=float) * 0.1
+        self._proj_y = np.array(y_c, dtype=float) * 0.1
+        seg = np.hypot(np.diff(self._proj_x), np.diff(self._proj_y))
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        total = cum[-1] if cum[-1] > 0 else 1.0
+        self._proj_frac = cum / total
+
         self._status_label.setText("Circuit loaded ✓")
         # Switch to real track view automatically
         self._set_view("real", self._active_style, self._inactive_style)
+
+    def _project(self, x: float, y: float) -> float:
+        """Nearest-point projection of a live (x, y) onto the lap fraction."""
+        d2 = (self._proj_x - x) ** 2 + (self._proj_y - y) ** 2
+        return float(self._proj_frac[int(d2.argmin())])
 
     def _on_welcome(self, welcome: dict):
         session = welcome.get("session", {})
@@ -333,9 +376,12 @@ class OPWTrackMapWindow(QMainWindow):
         drivers = session.get("driver_count", "?")
         self._status_label.setText(f"Connected — {drivers} drivers, {total_laps} laps")
 
-    def _on_positions_updated(self, fracs: dict, colors: dict, leader: str):
+    def _on_positions_updated(self, xy: dict, colors: dict, leader: str):
         self._frame_count += 1
         self._msg_label.setText(f"Frames: {self._frame_count}")
+        if self._proj_x is None:
+            return  # circuit geometry not loaded yet — can't project
+        fracs = {code: self._project(x, y) for code, (x, y) in xy.items()}
         self._map.update_positions(fracs, colors, leader or None,
                                    self._circuit_length_m)
 
