@@ -355,11 +355,18 @@ class OPWTrackMapWindow(QMainWindow):
 
     # Colour each announcement by its leading marker.
     _ANN_COLORS = {
+        "💥": "#ff3b3b",  # incident — car stopped/retired
+        "🟥": "#ff3b3b",  # red flag
         "🚨": "#ff5a5f",  # penalty
+        "🟨": "#ffcc00",  # safety car
+        "⚠": "#ff9f1c",  # double yellow
+        "🟧": "#ff9f1c",  # virtual safety car
+        "🟡": "#ffd166",  # yellow flag
         "🔍": "#ffd166",  # under investigation
         "📝": "#aaaaaa",  # noted
         "⏱": "#4cc9f0",  # lap time deleted
-        "✅": "#52c41a",  # no further action
+        "✅": "#52c41a",  # no further action / green
+        "🟢": "#52c41a",  # track clear
     }
 
     def _on_announcements(self, anns: list):

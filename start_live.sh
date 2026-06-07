@@ -26,11 +26,26 @@ YEAR="${3:-2026}"
 screen -S f1live -X quit 2>/dev/null || true
 sleep 0.3
 
+# Guard: if something is still bound to 8765 (e.g. a manually-run bridge),
+# abort rather than launch a second bridge — two bridges sharing a record
+# file produces a corrupted, half-NUL recording.
+if lsof -iTCP:8765 -sTCP:LISTEN -n >/dev/null 2>&1; then
+  echo "ERROR: port 8765 is already in use — another bridge is running." >&2
+  echo "       Stop it first (Ctrl-C in its terminal, or: lsof -iTCP:8765)." >&2
+  exit 1
+fi
+
+# Each run records to its own timestamped file so concurrent/old runs can
+# never clobber the same recording.
+mkdir -p "$DIR/recordings"
+RECORDING="$DIR/recordings/session_$(date +%Y%m%d_%H%M%S).txt"
+
 # 1. Live OPW bridge in screen
 echo "Starting live OPW bridge in screen session 'f1live'..."
+echo "Recording to: $RECORDING"
 screen -dmS f1live bash -c "
   cd '$DIR'
-  '$PYTHON' live_opw_bridge.py --record live_session.txt
+  '$PYTHON' live_opw_bridge.py --record '$RECORDING'
   echo '--- bridge exited (press enter) ---'
   read -r _
 "
@@ -53,7 +68,7 @@ cat <<EOF
   Telemetry trace : $DRIVER  (PID $TRACE_PID)
   Track map       : $ROUND $YEAR  (PID $MAP_PID)
   Live bridge     : screen session 'f1live'
-  Recording to    : $DIR/live_session.txt
+  Recording to    : $RECORDING
 
   Detach from screen : Ctrl-A D
   Reattach           : screen -r f1live

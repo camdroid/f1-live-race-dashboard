@@ -75,6 +75,17 @@ _CAR_RE = re.compile(r"CAR (\d+)\s*\(([A-Z0-9]{2,3})\)")
 _TRAIL_TS_RE = re.compile(r"\s*\(?\d{1,2}:\d{2}:\d{2}\)?\s*$")
 _TRAIL_LAP_RE = re.compile(r"\s*LAP \d+\s*$", re.I)
 
+# TrackStatus codes → (marker, label). These are the primary crash/incident
+# signal: a Safety Car or Red flag almost always means an on-track incident.
+_TRACK_STATUS_LABELS = {
+    "1": ("🟢", "Track clear (green)"),
+    "2": ("🟡", "Yellow flag"),
+    "4": ("🟨", "SAFETY CAR deployed"),
+    "5": ("🟥", "RED FLAG — race suspended"),
+    "6": ("🟧", "Virtual Safety Car deployed"),
+    "7": ("🟧", "Virtual Safety Car ending"),
+}
+
 # Ordered: first match wins. (regex, label) — label describes the penalty.
 _PENALTY_PATTERNS = [
     (re.compile(r"(\d+)\s*SECOND TIME PENALTY"), lambda m: f"{m.group(1)}-second time penalty"),
@@ -129,6 +140,21 @@ def describe_race_control_event(msg: dict, driver_info: dict) -> str | None:
     if "NO FURTHER INVESTIGATION" in upper or "NO FURTHER ACTION" in upper:
         return f"✅ No further action — {who}: {reason}{lap_str}" if who else None
 
+    # Car stopped / retired on track — the clearest crash/incident signal that
+    # actually names a driver.
+    if "STOPPED ON TRACK" in upper or " RETIRED" in upper or upper.endswith("STOPPED"):
+        sec = re.search(r"SECTOR (\d+)", upper)
+        where = f" in sector {sec.group(1)}" if sec else ""
+        target = who or "Car"
+        verb = "retired" if "RETIRED" in upper else "stopped on track"
+        return f"💥 INCIDENT — {target} {verb}{where}{lap_str}"
+
+    # Double-yellow: serious local hazard (debris, stopped car, marshals on track)
+    if "DOUBLE YELLOW" in upper:
+        sec = re.search(r"SECTOR (\d+)", upper)
+        where = f" (sector {sec.group(1)})" if sec else ""
+        return f"⚠ Double yellow{where}{lap_str}"
+
     # Actual penalty verdicts (highest priority)
     for pattern, render in _PENALTY_PATTERNS:
         m = pattern.search(upper)
@@ -180,6 +206,7 @@ class LiveState:
         self.race_control: list[dict] = []
         self._seen_rc: set[str] = set()  # de-dupe race-control announcements
         self.announcements: list[dict] = []  # formatted steward/penalty lines
+        self.track_status_code: str | None = None  # last seen TrackStatus code
 
         self.session_start_utc: str = datetime.now(timezone.utc).isoformat()
 
@@ -291,12 +318,29 @@ class LiveState:
                     self._seen_rc.add(key)
                     line = describe_race_control_event(msg, self.driver_info)
                     if line:
-                        log.info(line)
-                        self.announcements.append(
-                            {"text": line, "lap": msg.get("Lap")}
-                        )
-                        if len(self.announcements) > 50:
-                            self.announcements.pop(0)
+                        self._announce(line, msg.get("Lap"))
+
+    def _announce(self, line: str, lap=None):
+        """Record + log a formatted announcement. Caller holds the lock."""
+        log.info(line)
+        self.announcements.append({"text": line, "lap": lap})
+        if len(self.announcements) > 50:
+            self.announcements.pop(0)
+
+    def apply_track_status(self, data: dict):
+        status = str(data.get("Status", "")).strip()
+        if not status:
+            return
+        with self._lock:
+            if status == self.track_status_code:
+                return
+            self.track_status_code = status
+            marker, label = _TRACK_STATUS_LABELS.get(
+                status, ("⚑", f"Track status {status}")
+            )
+            lap = self.lap_count.get("CurrentLap")
+            lap_str = f"  [Lap {lap}]" if lap else ""
+            self._announce(f"{marker} {label}{lap_str}", lap)
 
     def snapshot(self) -> dict:
         """Return a point-in-time copy of all state."""
@@ -369,6 +413,8 @@ class LiveF1Client:
             self.state.apply_lap_count(raw_data if isinstance(raw_data, dict) else {})
         elif topic == "RaceControlMessages":
             self.state.apply_race_control(raw_data if isinstance(raw_data, dict) else {})
+        elif topic == "TrackStatus":
+            self.state.apply_track_status(raw_data if isinstance(raw_data, dict) else {})
 
     def _on_message(self, msg):
         if self._output_file:
