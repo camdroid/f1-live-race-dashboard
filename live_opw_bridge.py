@@ -371,6 +371,41 @@ def _decode_compressed(text: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Message routing (shared by the live client and the replay source)
+# ---------------------------------------------------------------------------
+def route_message(state: "LiveState", topic: str, data):
+    """Route a normalized (topic, data) pair to the right state handler."""
+    if topic == "CarData.z":
+        state.apply_car_data(data)
+    elif topic == "Position.z":
+        state.apply_position_data(data)
+    elif topic == "DriverList":
+        state.apply_driver_list(data if isinstance(data, dict) else {})
+    elif topic == "TimingData":
+        state.apply_timing_data(data if isinstance(data, dict) else {})
+    elif topic == "TimingAppData":
+        state.apply_timing_app(data if isinstance(data, dict) else {})
+    elif topic == "WeatherData":
+        state.apply_weather(data if isinstance(data, dict) else {})
+    elif topic == "SessionInfo":
+        state.apply_session_info(data if isinstance(data, dict) else {})
+    elif topic == "LapCount":
+        state.apply_lap_count(data if isinstance(data, dict) else {})
+    elif topic == "RaceControlMessages":
+        state.apply_race_control(data if isinstance(data, dict) else {})
+    elif topic == "TrackStatus":
+        state.apply_track_status(data if isinstance(data, dict) else {})
+
+
+def safe_route(state: "LiveState", topic: str, data):
+    """Route a message, never letting one bad payload tear down the feed."""
+    try:
+        route_message(state, topic, data)
+    except Exception:
+        log.warning(f"Skipped malformed '{topic}' message", exc_info=False)
+
+
+# ---------------------------------------------------------------------------
 # F1 SignalR client
 # ---------------------------------------------------------------------------
 class LiveF1Client:
@@ -391,66 +426,49 @@ class LiveF1Client:
         self.no_auth = no_auth
         self._connection = None
         self._output_file = None
+        self._record_t0 = None
         self._connected = False
 
-    def _parse_message(self, topic: str, raw_data):
-        """Route a decoded message to the appropriate state handler."""
-        if topic == "CarData.z":
-            self.state.apply_car_data(raw_data)
-        elif topic == "Position.z":
-            self.state.apply_position_data(raw_data)
-        elif topic == "DriverList":
-            self.state.apply_driver_list(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "TimingData":
-            self.state.apply_timing_data(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "TimingAppData":
-            self.state.apply_timing_app(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "WeatherData":
-            self.state.apply_weather(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "SessionInfo":
-            self.state.apply_session_info(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "LapCount":
-            self.state.apply_lap_count(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "RaceControlMessages":
-            self.state.apply_race_control(raw_data if isinstance(raw_data, dict) else {})
-        elif topic == "TrackStatus":
-            self.state.apply_track_status(raw_data if isinstance(raw_data, dict) else {})
+    def _record(self, topic, data):
+        """Write one replayable JSON line: relative time, topic, payload."""
+        if not self._output_file:
+            return
+        if self._record_t0 is None:
+            self._record_t0 = time.monotonic()
+        rt = round(time.monotonic() - self._record_t0, 4)
+        try:
+            self._output_file.write(
+                json.dumps({"rt": rt, "topic": topic, "data": data}) + "\n"
+            )
+            self._output_file.flush()
+        except (TypeError, ValueError):
+            pass  # non-serializable payload — skip recording it
 
     def _on_message(self, msg):
-        if self._output_file:
-            self._output_file.write(str(msg) + "\n")
-            self._output_file.flush()
-
         if isinstance(msg, CompletionMessage):
+            # Initial snapshot: one record per topic.
             for topic, data in (msg.result or {}).items():
                 if isinstance(data, str):
                     data = _decode_compressed(data) or data
-                self._safe_parse(topic, data)
+                self._record(topic, data)
+                safe_route(self.state, topic, data)
 
         elif isinstance(msg, list) and len(msg) >= 2:
             topic = msg[0]
             raw = msg[1]
-            # CarData.z and Position.z arrive as compressed strings
-            if topic in ("CarData.z", "Position.z"):
-                self._safe_parse(topic, raw)
-            else:
-                if isinstance(raw, str):
-                    try:
-                        raw = json.loads(
-                            raw.replace("'", '"')
-                               .replace('True', 'true')
-                               .replace('False', 'false')
-                        )
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                self._safe_parse(topic, raw)
-
-    def _safe_parse(self, topic, data):
-        # A single malformed message must never tear down the feed.
-        try:
-            self._parse_message(topic, data)
-        except Exception:
-            log.warning(f"Skipped malformed '{topic}' message", exc_info=False)
+            # CarData.z and Position.z stay as compressed strings; everything
+            # else is normalized to a dict before routing/recording.
+            if topic not in ("CarData.z", "Position.z") and isinstance(raw, str):
+                try:
+                    raw = json.loads(
+                        raw.replace("'", '"')
+                           .replace('True', 'true')
+                           .replace('False', 'false')
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            self._record(topic, raw)
+            safe_route(self.state, topic, raw)
 
     def start(self):
         if self.record_file:
@@ -493,6 +511,71 @@ class LiveF1Client:
             self._connection.stop()
         if self._output_file:
             self._output_file.close()
+
+
+# ---------------------------------------------------------------------------
+# Replay source — feed a recording through the same pipeline as live data
+# ---------------------------------------------------------------------------
+class ReplaySource:
+    def __init__(self, state: LiveState, filename: str,
+                 speed: float = 1.0, loop: bool = False):
+        self.state = state
+        self.filename = filename
+        self.speed = max(0.01, speed)
+        self.loop = loop
+        self._running = False
+
+    def start(self):
+        self._running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self):
+        self._running = False
+
+    def _load(self):
+        records = []
+        with open(self.filename) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def _run(self):
+        try:
+            records = self._load()
+        except OSError as e:
+            log.error(f"Could not read recording '{self.filename}': {e}")
+            return
+        if not records:
+            log.error(
+                f"Recording '{self.filename}' has no replayable messages. "
+                "(Old str(msg) recordings are not supported — re-record.)"
+            )
+            return
+
+        log.info(
+            f"Replaying {len(records)} messages from {self.filename} "
+            f"at {self.speed}x{' (looping)' if self.loop else ''}"
+        )
+        base = records[0].get("rt", 0.0)
+        while self._running:
+            t0 = time.monotonic()
+            for rec in records:
+                if not self._running:
+                    return
+                target = t0 + (rec.get("rt", 0.0) - base) / self.speed
+                delay = target - time.monotonic()
+                if delay > 0:
+                    time.sleep(min(delay, 5.0))
+                safe_route(self.state, rec.get("topic"), rec.get("data"))
+            log.info("Replay finished.")
+            if not self.loop:
+                return
 
 
 # ---------------------------------------------------------------------------
@@ -764,27 +847,39 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-auth", action="store_true")
     parser.add_argument("--record", metavar="FILE", default=None,
-                        help="Also save raw SignalR feed to a file")
+                        help="Save the feed to a replayable recording file")
+    parser.add_argument("--replay", metavar="FILE", default=None,
+                        help="Replay a recording instead of connecting live "
+                             "(no F1TV auth needed)")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="Replay speed multiplier (default: 1.0)")
+    parser.add_argument("--loop", action="store_true",
+                        help="Loop the replay when it reaches the end")
     args = parser.parse_args()
 
     state = LiveState()
-    client = LiveF1Client(state, record_file=args.record, no_auth=args.no_auth)
 
-    def run_f1_client():
+    if args.replay:
+        source = ReplaySource(state, args.replay, speed=args.speed, loop=args.loop)
+        log.info(f"Replay mode: {args.replay}")
+    else:
+        source = LiveF1Client(state, record_file=args.record, no_auth=args.no_auth)
+        log.info("Connecting to F1 live timing feed...")
+
+    def run_source():
         try:
-            client.start()
+            source.start()
         except Exception as e:
-            log.error(f"F1 client error: {e}")
+            log.error(f"Source error: {e}")
 
-    log.info("Connecting to F1 live timing feed...")
-    threading.Thread(target=run_f1_client, daemon=True).start()
+    threading.Thread(target=run_source, daemon=True).start()
 
     server = OPWServer(state, host=args.host, port=args.port)
     try:
         asyncio.run(server.serve())
     except KeyboardInterrupt:
         log.info("Shutting down.")
-        client.stop()
+        source.stop()
 
 
 if __name__ == "__main__":
