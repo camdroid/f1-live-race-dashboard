@@ -381,6 +381,22 @@ class OPWTrackMapWindow(QMainWindow):
         self._msg_label.setText(f"Frames: {self._frame_count}")
         if self._proj_x is None:
             return  # circuit geometry not loaded yet — can't project
+
+        # F1TV Access streams the Position feed with all coordinates zeroed
+        # (real GPS is gated to higher tiers). Detect that and show a note
+        # instead of collapsing every dot onto the origin.
+        vals = list(xy.values())
+        all_zero = bool(vals) and all(
+            abs(x) < 1e-6 and abs(y) < 1e-6 for x, y in vals
+        )
+        if all_zero:
+            self._status_label.setText(
+                "⚠ Position feed returning zeros — live track positions "
+                "unavailable on this subscription (telemetry still live)"
+            )
+            return  # don't move dots to (0,0)
+
+        self._status_label.setText("Live positions ✓")
         fracs = {code: self._project(x, y) for code, (x, y) in xy.items()}
         self._map.update_positions(fracs, colors, leader or None,
                                    self._circuit_length_m)
