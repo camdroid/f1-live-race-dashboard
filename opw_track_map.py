@@ -31,9 +31,9 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QStatusBar,
+    QLabel, QPushButton, QStatusBar, QListWidget, QListWidgetItem,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 from websockets.asyncio.client import connect
 
 # _TrackMapWidget lives in the f1-race-replay submodule under vendor/.
@@ -65,6 +65,7 @@ class OPWClient(QObject):
     positions_updated = Signal(dict, dict, str)   # {code: (x, y)}, colors, leader
     status_changed = Signal(str)
     welcome_received = Signal(dict)
+    announcements_updated = Signal(list)          # [{"text", "lap"}, ...]
 
     def __init__(self, host: str, port: int):
         super().__init__()
@@ -109,7 +110,8 @@ class OPWClient(QObject):
 
             await ws.send(json.dumps({
                 "action": "subscribe",
-                "channels": ["telemetry.drivers", "leaderboard", "telemetry.lap"],
+                "channels": ["telemetry.drivers", "leaderboard",
+                             "telemetry.lap", "race_control"],
             }))
 
             driver_xy: dict[str, tuple] = {}
@@ -141,6 +143,11 @@ class OPWClient(QObject):
                     drivers = msg.get("payload", {}).get("drivers", [])
                     if drivers:
                         leader_code = drivers[0].get("driver_code")
+
+                elif event == "race_control":
+                    anns = msg.get("payload", {}).get("announcements", [])
+                    if anns:
+                        self.announcements_updated.emit(list(anns))
 
                 if driver_xy:
                     self.positions_updated.emit(
@@ -268,6 +275,7 @@ class OPWTrackMapWindow(QMainWindow):
         self._client.positions_updated.connect(self._on_positions_updated)
         self._client.status_changed.connect(self._on_status_changed)
         self._client.welcome_received.connect(self._on_welcome)
+        self._client.announcements_updated.connect(self._on_announcements)
         self._client.start()
 
         # Load circuit geometry in background
@@ -323,6 +331,20 @@ class OPWTrackMapWindow(QMainWindow):
         self._map = _TrackMapWidget()
         root.addWidget(self._map, stretch=1)
 
+        # Race control / penalty feed
+        rc_label = self._make_label("Race Control")
+        rc_label.setStyleSheet("color:#888; font-weight:bold; padding-top:4px;")
+        root.addWidget(rc_label)
+
+        self._rc_list = QListWidget()
+        self._rc_list.setFixedHeight(132)
+        self._rc_list.setStyleSheet(
+            "QListWidget { background:#141414; border:1px solid #333; "
+            "font-family:Menlo,Monaco,monospace; font-size:11px; color:#ddd; }"
+        )
+        root.addWidget(self._rc_list)
+        self._ann_count = 0  # how many announcements we've already rendered
+
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         self._conn_label = QLabel("Disconnected")
@@ -330,6 +352,29 @@ class OPWTrackMapWindow(QMainWindow):
         status_bar.addPermanentWidget(self._conn_label)
         status_bar.addPermanentWidget(self._msg_label)
         self._frame_count = 0
+
+    # Colour each announcement by its leading marker.
+    _ANN_COLORS = {
+        "🚨": "#ff5a5f",  # penalty
+        "🔍": "#ffd166",  # under investigation
+        "📝": "#aaaaaa",  # noted
+        "⏱": "#4cc9f0",  # lap time deleted
+        "✅": "#52c41a",  # no further action
+    }
+
+    def _on_announcements(self, anns: list):
+        # The bridge re-sends the full list every cycle; only render new ones.
+        if len(anns) <= self._ann_count:
+            return
+        for ann in anns[self._ann_count:]:
+            text = ann.get("text", "")
+            item = QListWidgetItem(text)
+            item.setForeground(QColor(self._ANN_COLORS.get(text[:1], "#dddddd")))
+            self._rc_list.insertItem(0, item)  # newest on top
+        self._ann_count = len(anns)
+        # Keep the list bounded in the UI too
+        while self._rc_list.count() > 60:
+            self._rc_list.takeItem(self._rc_list.count() - 1)
 
     def _set_view(self, mode: str, active: str, inactive: str):
         is_circle = mode == "circle"

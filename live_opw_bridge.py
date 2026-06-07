@@ -179,6 +179,7 @@ class LiveState:
         self.weather: dict = {}
         self.race_control: list[dict] = []
         self._seen_rc: set[str] = set()  # de-dupe race-control announcements
+        self.announcements: list[dict] = []  # formatted steward/penalty lines
 
         self.session_start_utc: str = datetime.now(timezone.utc).isoformat()
 
@@ -291,6 +292,11 @@ class LiveState:
                     line = describe_race_control_event(msg, self.driver_info)
                     if line:
                         log.info(line)
+                        self.announcements.append(
+                            {"text": line, "lap": msg.get("Lap")}
+                        )
+                        if len(self.announcements) > 50:
+                            self.announcements.pop(0)
 
     def snapshot(self) -> dict:
         """Return a point-in-time copy of all state."""
@@ -304,6 +310,7 @@ class LiveState:
                 "lap_count": dict(self.lap_count),
                 "weather": dict(self.weather),
                 "race_control": list(self.race_control),
+                "announcements": [dict(a) for a in self.announcements],
             }
 
 
@@ -572,9 +579,10 @@ def _build_frames(snap: dict) -> dict[str, Any]:
             "payload": weather,
         }
 
-    # Race control — emit each unsent message once
-    if snap["race_control"]:
-        last = snap["race_control"][-1]
+    # Race control — carry the formatted steward/penalty announcements plus
+    # the latest raw message (kept for OPW-protocol compatibility).
+    if snap["race_control"] or snap["announcements"]:
+        last = snap["race_control"][-1] if snap["race_control"] else {}
         frames["race_control"] = {
             "timestamp": timestamp,
             "event": "race_control",
@@ -584,6 +592,7 @@ def _build_frames(snap: dict) -> dict[str, Any]:
                 "scope": last.get("Scope", "Track"),
                 "sector": last.get("RacingNumber", 0),
                 "current_lap": current_lap,
+                "announcements": snap["announcements"],
             },
         }
 
