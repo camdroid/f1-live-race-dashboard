@@ -7,8 +7,12 @@ so that OPW dashboards can be used with a live race.
 
 Usage:
     .venv/bin/python live_opw_bridge.py [--port 8765] [--no-auth] [--record FILE]
+                                        [--delay 30m]
 
 Then point any OPW dashboard at ws://localhost:8765 as normal.
+
+--delay runs the dashboards behind real-time (e.g. --delay 30m when your
+broadcast is half an hour behind the live feed); recording is unaffected.
 
 Run the example dashboard from open-pit-wall:
     cd ~/projects/open-pit-wall/examples/driver-telemetry-trace
@@ -20,6 +24,7 @@ import asyncio
 import base64
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -405,6 +410,60 @@ def safe_route(state: "LiveState", topic: str, data):
         log.warning(f"Skipped malformed '{topic}' message", exc_info=False)
 
 
+def parse_delay(value: str) -> float:
+    """Parse a delay like '90', '90s', '30m', or '1.5h' into seconds."""
+    m = re.fullmatch(r"([0-9]*\.?[0-9]+)\s*([smh]?)", str(value).strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"invalid delay {value!r} (use e.g. 90, 90s, 30m, 1.5h)"
+        )
+    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
+
+
+class DelayedRouter:
+    """
+    Buffer live messages and deliver them to state `delay` seconds later, so
+    the dashboards can track a broadcast that runs behind the real-time feed.
+
+    Session metadata (driver list, session info) is delivered immediately —
+    it isn't a spoiler and dashboards would otherwise sit blank while the
+    buffer fills for the first `delay` seconds.
+    """
+
+    IMMEDIATE_TOPICS = {"DriverList", "SessionInfo"}
+
+    def __init__(self, state: LiveState, delay: float):
+        self.state = state
+        self.delay = delay
+        self._queue: queue.Queue = queue.Queue()
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def route(self, topic: str, data):
+        if topic in self.IMMEDIATE_TOPICS:
+            safe_route(self.state, topic, data)
+            return
+        self._queue.put((time.monotonic() + self.delay, topic, data))
+
+    def stop(self):
+        self._running = False
+
+    def _run(self):
+        while self._running:
+            try:
+                due, topic, data = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            while self._running:
+                remaining = due - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 0.5))
+            if self._running:
+                safe_route(self.state, topic, data)
+
+
 # ---------------------------------------------------------------------------
 # F1 SignalR client
 # ---------------------------------------------------------------------------
@@ -420,10 +479,11 @@ class LiveF1Client:
     ]
 
     def __init__(self, state: LiveState, record_file: str | None = None,
-                 no_auth: bool = False):
+                 no_auth: bool = False, delay: float = 0.0):
         self.state = state
         self.record_file = record_file
         self.no_auth = no_auth
+        self._router = DelayedRouter(state, delay) if delay > 0 else None
         self._connection = None
         self._output_file = None
         self._record_t0 = None
@@ -444,6 +504,13 @@ class LiveF1Client:
         except (TypeError, ValueError):
             pass  # non-serializable payload — skip recording it
 
+    def _route(self, topic, data):
+        """Route to state — through the delay buffer when one is configured."""
+        if self._router:
+            self._router.route(topic, data)
+        else:
+            safe_route(self.state, topic, data)
+
     def _on_message(self, msg):
         if isinstance(msg, CompletionMessage):
             # Initial snapshot: one record per topic.
@@ -451,7 +518,7 @@ class LiveF1Client:
                 if isinstance(data, str):
                     data = _decode_compressed(data) or data
                 self._record(topic, data)
-                safe_route(self.state, topic, data)
+                self._route(topic, data)
 
         elif isinstance(msg, list) and len(msg) >= 2:
             topic = msg[0]
@@ -468,7 +535,7 @@ class LiveF1Client:
                 except (json.JSONDecodeError, ValueError):
                     pass
             self._record(topic, raw)
-            safe_route(self.state, topic, raw)
+            self._route(topic, raw)
 
     def start(self):
         if self.record_file:
@@ -509,6 +576,8 @@ class LiveF1Client:
     def stop(self):
         if self._connection:
             self._connection.stop()
+        if self._router:
+            self._router.stop()
         if self._output_file:
             self._output_file.close()
 
@@ -855,15 +924,26 @@ def main():
                         help="Replay speed multiplier (default: 1.0)")
     parser.add_argument("--loop", action="store_true",
                         help="Loop the replay when it reaches the end")
+    parser.add_argument("--delay", type=parse_delay, default=0.0, metavar="TIME",
+                        help="Run the dashboards this far behind the live feed "
+                             "(e.g. 90, 90s, 30m, 1.5h) — for when your "
+                             "broadcast lags real-time. Live mode only.")
     args = parser.parse_args()
 
     state = LiveState()
 
     if args.replay:
+        if args.delay:
+            log.warning("--delay is ignored in replay mode")
         source = ReplaySource(state, args.replay, speed=args.speed, loop=args.loop)
         log.info(f"Replay mode: {args.replay}")
     else:
-        source = LiveF1Client(state, record_file=args.record, no_auth=args.no_auth)
+        source = LiveF1Client(state, record_file=args.record,
+                              no_auth=args.no_auth, delay=args.delay)
+        if args.delay:
+            log.info(
+                f"Delaying dashboards by {args.delay:.0f}s behind the live feed"
+            )
         log.info("Connecting to F1 live timing feed...")
 
     def run_source():

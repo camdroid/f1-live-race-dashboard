@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # start_live.sh — launch the full F1 live timing dashboard stack
 #
-# Usage: ./start_live.sh [DRIVER] [ROUND] [YEAR]
+# Usage: ./start_live.sh [DRIVER] [ROUND] [YEAR] [DELAY]
 #
 #   DRIVER  Driver code for telemetry trace  (default: VER)
 #   ROUND   Round name for track geometry    (default: Monaco)
 #   YEAR    Season year                      (default: 2026)
+#   DELAY   Run dashboards this far behind the live feed (default: 0)
+#           e.g. 90, 90s, 30m, 1.5h — for when your broadcast lags real-time
 #
 # Example: ./start_live.sh LEC Monaco 2026
+# Example: ./start_live.sh VER Monaco 2026 30m   # started watching 30 min late
 
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +25,7 @@ fi
 DRIVER="${1:-VER}"
 ROUND="${2:-Monaco}"
 YEAR="${3:-2026}"
+DELAY="${4:-0}"
 
 screen -S f1live -X quit 2>/dev/null || true
 sleep 0.3
@@ -43,9 +47,15 @@ RECORDING="$DIR/recordings/session_$(date +%Y%m%d_%H%M%S).txt"
 # 1. Live OPW bridge in screen
 echo "Starting live OPW bridge in screen session 'f1live'..."
 echo "Recording to: $RECORDING"
+DELAY_ARGS=()
+if [[ "$DELAY" != "0" ]]; then
+  DELAY_ARGS=(--delay "$DELAY")
+  echo "Dashboards will run ${DELAY} behind the live feed"
+fi
+
 screen -dmS f1live bash -c "
   cd '$DIR'
-  '$PYTHON' live_opw_bridge.py --record '$RECORDING'
+  '$PYTHON' live_opw_bridge.py --record '$RECORDING' ${DELAY_ARGS[*]}
   echo '--- bridge exited (press enter) ---'
   read -r _
 "
@@ -69,6 +79,7 @@ cat <<EOF
   Track map       : $ROUND $YEAR  (PID $MAP_PID)
   Live bridge     : screen session 'f1live'
   Recording to    : $RECORDING
+  Feed delay      : ${DELAY}
 
   Detach from screen : Ctrl-A D
   Reattach           : screen -r f1live
