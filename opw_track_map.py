@@ -66,6 +66,7 @@ class OPWClient(QObject):
     status_changed = Signal(str)
     welcome_received = Signal(dict)
     announcements_updated = Signal(list)          # [{"text", "lap"}, ...]
+    auth_error_changed = Signal(str)              # "" = authenticated
 
     def __init__(self, host: str, port: int):
         super().__init__()
@@ -126,6 +127,10 @@ class OPWClient(QObject):
                     continue
 
                 event = msg.get("event", "")
+
+                if msg.get("type") == "status":
+                    self.auth_error_changed.emit(msg.get("auth_error") or "")
+                    continue
 
                 if event == "telemetry.drivers":
                     for entry in msg.get("payload", []):
@@ -276,6 +281,7 @@ class OPWTrackMapWindow(QMainWindow):
         self._client.status_changed.connect(self._on_status_changed)
         self._client.welcome_received.connect(self._on_welcome)
         self._client.announcements_updated.connect(self._on_announcements)
+        self._client.auth_error_changed.connect(self._on_auth_error)
         self._client.start()
 
         # Load circuit geometry in background
@@ -291,6 +297,16 @@ class OPWTrackMapWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
+
+        self._auth_banner = QLabel("")
+        self._auth_banner.setWordWrap(True)
+        self._auth_banner.setAlignment(Qt.AlignCenter)
+        self._auth_banner.setStyleSheet(
+            "background:#8a1c1c; color:#ffffff; font-weight:bold;"
+            "padding:8px; border-radius:4px;"
+        )
+        self._auth_banner.hide()
+        root.addWidget(self._auth_banner)
 
         # Status bar row
         bar = QHBoxLayout()
@@ -423,10 +439,22 @@ class OPWTrackMapWindow(QMainWindow):
         return float(self._proj_frac[int(d2.argmin())])
 
     def _on_welcome(self, welcome: dict):
+        self._on_auth_error(welcome.get("auth_error") or "")
         session = welcome.get("session", {})
         total_laps = session.get("total_laps", "?")
         drivers = session.get("driver_count", "?")
         self._status_label.setText(f"Connected — {drivers} drivers, {total_laps} laps")
+
+    def _on_auth_error(self, reason: str):
+        if reason:
+            self._auth_banner.setText(
+                f"⚠ NOT AUTHENTICATED — {reason}\n"
+                f"Open the sign-in URL shown in the bridge terminal "
+                f"(screen -r f1live)."
+            )
+            self._auth_banner.show()
+        else:
+            self._auth_banner.hide()
 
     def _on_positions_updated(self, xy: dict, colors: dict, leader: str):
         self._frame_count += 1

@@ -210,6 +210,13 @@ class LiveState:
 
         self.session_start_utc: str = datetime.now(timezone.utc).isoformat()
 
+        # Human-readable reason live data is unavailable (None = authenticated)
+        self.auth_error: str | None = None
+
+    def set_auth_error(self, reason: str | None):
+        with self._lock:
+            self.auth_error = reason
+
     def apply_car_data(self, payload: str | dict):
         """Decode and merge CarData.z payload into per-driver telemetry."""
         data = _decode_compressed(payload) if isinstance(payload, str) else payload
@@ -355,6 +362,7 @@ class LiveState:
                 "weather": dict(self.weather),
                 "race_control": list(self.race_control),
                 "announcements": [dict(a) for a in self.announcements],
+                "auth_error": self.auth_error,
             }
 
 
@@ -403,6 +411,56 @@ def safe_route(state: "LiveState", topic: str, data):
         route_message(state, topic, data)
     except Exception:
         log.warning(f"Skipped malformed '{topic}' message", exc_info=False)
+
+
+# ---------------------------------------------------------------------------
+# F1TV authentication pre-check
+# ---------------------------------------------------------------------------
+def check_f1_auth() -> str | None:
+    """Validate the cached F1TV token without prompting.
+
+    Returns None when the token looks valid (or can't be verified due to a
+    network problem), otherwise a human-readable reason live data will not
+    flow until the user re-authenticates.
+    """
+    from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+
+    from fastf1.internals import f1auth
+
+    try:
+        token = f1auth._subscription_token or f1auth.AUTH_DATA_FILE.read_text()
+    except OSError:
+        token = ""
+    if not token:
+        return ("No F1TV login found — live timing requires an active "
+                "F1TV Access/Pro/Premium subscription.")
+    try:
+        f1auth._verify_jwt(token, f1auth.JWKS_URL)
+    except ExpiredSignatureError:
+        return "Your F1TV login has EXPIRED — please sign in again."
+    except InvalidTokenError:
+        return "Your F1TV login token is INVALID — please sign in again."
+    except Exception as e:
+        log.warning(f"Could not verify F1TV token ({e}); continuing anyway.")
+    return None
+
+
+def print_auth_banner(reason: str):
+    red, reset = "\033[1;91m", "\033[0m"
+    rule = "=" * 68
+    print(
+        f"\n{red}{rule}\n"
+        f"  !!  NOT AUTHENTICATED — NO LIVE F1 DATA WILL BE SHOWN  !!\n"
+        f"{rule}{reset}\n\n"
+        f"  {reason}\n\n"
+        f"  FastF1 will now start its browser sign-in flow. Open the\n"
+        f"  https://f1login.fastf1.dev URL printed below in a browser ON\n"
+        f"  THIS MACHINE and log in with your Formula1/F1TV account.\n"
+        f"  (Bridge running under screen? Reattach with: screen -r f1live)\n\n"
+        f"  The dashboards will stay empty until sign-in completes.\n"
+        f"{red}{rule}{reset}\n",
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +555,7 @@ class LiveF1Client:
 
     def _on_open(self):
         self._connected = True
+        self.state.set_auth_error(None)
         log.info("Connected to F1 live timing feed")
         self._connection.send(
             "Subscribe", [self._topics], on_invocation=self._on_message
@@ -748,6 +807,7 @@ class OPWServer:
         return json.dumps({
             "type": "welcome",
             "default_channel": "telemetry.drivers",
+            "auth_error": snap["auth_error"],
             "channels": OPW_CHANNELS,
             "driver_channel_pattern": "telemetry.drivers.{DRIVER_CODE}",
             "session": {
@@ -794,33 +854,44 @@ class OPWServer:
 
     async def _broadcast_loop(self):
         """Publish state snapshots at 10 Hz to all subscribed clients."""
+        prev_auth: str | None = None
+        last_auth_push = 0.0
         while True:
             await asyncio.sleep(0.1)
 
             snap = self.state.snapshot()
-            if not snap["telemetry"]:
-                continue
+            frames = _build_frames(snap) if snap["telemetry"] else {}
 
-            frames = _build_frames(snap)
+            # Push auth status on every change (including recovery), and
+            # re-push every 3 s while broken so late subscribers see it too.
+            status_msg = None
+            auth = snap["auth_error"]
+            now = time.monotonic()
+            if auth != prev_auth or (auth and now - last_auth_push >= 3.0):
+                prev_auth = auth
+                last_auth_push = now
+                status_msg = json.dumps({
+                    "type": "status",
+                    "event": "status",
+                    "auth_error": auth or "",
+                })
+
+            if not frames and not status_msg:
+                continue
 
             async with self._lock:
                 clients = dict(self._clients)
 
             dead = []
             for ws, subscribed in clients.items():
-                if not subscribed:
-                    continue
-                to_send = []
+                to_send = [status_msg] if status_msg else []
                 for ch in subscribed:
                     if ch in frames:
-                        to_send.append(frames[ch])
-                    # single-driver channel pattern
-                    elif ch.startswith("telemetry.drivers.") and ch in frames:
-                        to_send.append(frames[ch])
+                        to_send.append(json.dumps(frames[ch]))
 
                 for msg in to_send:
                     try:
-                        await ws.send(json.dumps(msg))
+                        await ws.send(msg)
                     except websockets.exceptions.ConnectionClosed:
                         dead.append(ws)
                         break
@@ -863,6 +934,12 @@ def main():
         source = ReplaySource(state, args.replay, speed=args.speed, loop=args.loop)
         log.info(f"Replay mode: {args.replay}")
     else:
+        if not args.no_auth:
+            reason = check_f1_auth()
+            if reason:
+                log.error(f"F1TV auth check failed: {reason}")
+                print_auth_banner(reason)
+                state.set_auth_error(reason)
         source = LiveF1Client(state, record_file=args.record, no_auth=args.no_auth)
         log.info("Connecting to F1 live timing feed...")
 
