@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Architecture and component documentation for the F1 Race Tracker project — bridge, dashboards, record/replay, launchers, Docker.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏁</text></svg>">
+<title>F1 Race Tracker — Project Docs</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --ink: #191c21;
+    --muted: #5b6270;
+    --panel: #ffffff;
+    --line: #dde0e6;
+    --accent: #0e8fbd;
+    --good: #1f9d5b;
+    --warn: #c07a10;
+    --bad: #c93b3b;
+    --purple: #8f5bd4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101114; --ink: #e6e8ec; --muted: #9aa1ad; --panel: #17181c;
+      --line: #2a2c32; --accent: #4cc9f0; --good: #3fdc84; --warn: #ffb84d;
+      --bad: #ff6b6b; --purple: #b98af0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101114; --ink: #e6e8ec; --muted: #9aa1ad; --panel: #17181c;
+    --line: #2a2c32; --accent: #4cc9f0; --good: #3fdc84; --warn: #ffb84d;
+    --bad: #ff6b6b; --purple: #b98af0;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f7; --ink: #191c21; --muted: #5b6270; --panel: #ffffff;
+    --line: #dde0e6; --accent: #0e8fbd; --good: #1f9d5b; --warn: #c07a10;
+    --bad: #c93b3b; --purple: #8f5bd4;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+    margin: 0;
+    padding: 48px 24px 96px;
+  }
+  main { max-width: 880px; margin: 0 auto; }
+
+  .eyebrow {
+    font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 10px;
+  }
+  h1 {
+    font-size: 34px; line-height: 1.15; margin: 0 0 12px;
+    font-weight: 750; letter-spacing: -0.015em; text-wrap: balance;
+  }
+  .lede { color: var(--muted); max-width: 62ch; margin: 0 0 8px; }
+  h2 {
+    font-size: 21px; font-weight: 700; letter-spacing: -0.01em;
+    margin: 56px 0 6px; text-wrap: balance;
+  }
+  h2 + p.sub { color: var(--muted); margin: 0 0 20px; max-width: 65ch; }
+  h3 {
+    font-size: 15px; font-weight: 700; margin: 28px 0 6px;
+  }
+  p { max-width: 68ch; }
+  code {
+    font: 0.88em ui-monospace, Menlo, monospace;
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  pre {
+    background: #1a1a1a; color: #cccccc; border: 1px solid #3a3a3a;
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+    font: 12.5px/1.6 ui-monospace, Menlo, monospace;
+  }
+  pre code { background: none; padding: 0; font: inherit; }
+  pre .c { color: #7a7a7a; }
+  pre .g { color: #3fdc84; }
+  pre .y { color: #ffb84d; }
+  pre .b { color: #4cc9f0; }
+
+  /* Table of contents pills */
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 0; padding: 0; list-style: none; }
+  .toc a {
+    display: inline-block; font-size: 12.5px; text-decoration: none;
+    color: var(--accent); border: 1px solid var(--line); background: var(--panel);
+    border-radius: 999px; padding: 4px 12px;
+  }
+  .toc a:hover, .toc a:focus-visible { border-color: var(--accent); outline: none; }
+
+  /* ---------- Tables ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  td code { white-space: nowrap; }
+  .tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+
+  .note {
+    border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 14px; max-width: 68ch;
+  }
+  .note.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+
+  /* ---------- Always-dark panes (depict the running apps) ---------- */
+  .appwrap { overflow-x: auto; }
+  .darkpane {
+    background: #1a1a1a; color: #cccccc; border: 1px solid #3a3a3a;
+    border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+  }
+
+  /* Architecture diagram */
+  .diagram { min-width: 760px; padding: 8px 4px; }
+  .diagram text { font: 12px ui-monospace, Menlo, monospace; fill: #cccccc; }
+  .diagram .lbl { font-size: 10px; fill: #8a8a8a; }
+  .diagram .hd  { font-weight: 700; fill: #eeeeee; }
+  .diagram rect.box { fill: #202020; stroke: #3a3a3a; rx: 6; }
+  .diagram rect.hot { stroke: #4cc9f0; }
+  .diagram rect.rec { stroke: #ffb84d; }
+  .diagram rect.src { stroke: #3fdc84; }
+  .diagram line, .diagram path.wire { stroke: #666; stroke-width: 1.5; fill: none; }
+  .diagram path.dash { stroke-dasharray: 4 4; }
+
+  /* Terminal mockup */
+  .term {
+    min-width: 720px;
+    font: 12px/1.5 ui-monospace, Menlo, Monaco, monospace;
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px; border-bottom: 1px solid #2c2c2c; color: #888;
+    font: 11px -apple-system, system-ui, sans-serif;
+  }
+  .titlebar .dots { display: flex; gap: 6px; }
+  .titlebar .dots span { width: 10px; height: 10px; border-radius: 50%; background: #3f3f3f; }
+  .titlebar .tname { flex: 1; text-align: center; }
+  .termbody { padding: 10px 14px; white-space: pre; overflow-x: auto; }
+  .term .dim { color: #7a7a7a; }
+  .term .wh  { color: #eeeeee; font-weight: 700; }
+  .term .cy  { color: #4cc9f0; }
+  .term .grn { color: #3fdc84; }
+  .term .pur { color: #c9a0ff; font-weight: 700; }
+  .term .yel { color: #ffd12e; }
+  .term .red { color: #ff6b6b; }
+  .term .org { color: #ffb84d; }
+  .term .t-s { color: #ff5a5f; font-weight: 700; }
+  .term .t-m { color: #ffd12e; font-weight: 700; }
+  .term .t-h { color: #ffffff; font-weight: 700; }
+
+  /* Definition cards (like the reference's states grid) */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  }
+  .card .cap { font-size: 13px; font-weight: 650; margin-bottom: 2px; }
+  .card .why { font-size: 13px; color: var(--muted); }
+  .card .why code { font-size: 0.92em; }
+
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; padding: 0; margin: 16px 0 0; list-style: none; }
+  .legend li { font-size: 14px; color: var(--muted); }
+  .legend b { color: var(--ink); font-weight: 650; }
+
+  ul.qs, ol.qs { padding-left: 20px; }
+  .qs li { margin-bottom: 10px; max-width: 65ch; }
+
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<main>
+  <p class="eyebrow">F1 Race Tracker · Project documentation</p>
+  <h1>How the pieces fit together</h1>
+  <p class="lede">A set of live F1 dashboards built on
+  <a href="https://docs.fastf1.dev">FastF1</a> and Tom Shaw's Open Pit Wall (OPW).
+  The heart is a bridge that connects to the official F1 SignalR timing feed,
+  decodes the compressed telemetry channels, and re-broadcasts everything in
+  OPW's WebSocket protocol on port 8765 — with record/replay so the whole stack
+  runs offline between race weekends.</p>
+  <p class="lede">Companion doc: the
+  <a href="https://claude.ai/code/artifact/a2913b24-a05c-49f5-b6f4-7ed502a98e8d">Driver
+  Tower design proposal</a> covers the planned standings column for the track map.</p>
+
+  <ul class="toc">
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#bridge">The bridge</a></li>
+    <li><a href="#pitwall">Pit wall TUI</a></li>
+    <li><a href="#trackmap">Track map</a></li>
+    <li><a href="#replay">Record &amp; replay</a></li>
+    <li><a href="#launchers">Launchers</a></li>
+    <li><a href="#docker">Docker</a></li>
+    <li><a href="#conventions">Working on the repo</a></li>
+  </ul>
+
+  <h2 id="architecture">Architecture</h2>
+  <p class="sub">Three data sources, one shared display stack. Everything that
+  speaks the OPW protocol goes through the bridge on port 8765; the terminal
+  board talks to the F1 feed directly.</p>
+
+  <div class="appwrap">
+  <div class="darkpane" style="padding: 10px;">
+  <svg class="diagram" viewBox="0 0 860 356" role="img" aria-label="Architecture diagram: data sources feeding the bridge, dashboards, and terminal board">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+      </marker>
+    </defs>
+
+    <!-- Sources -->
+    <rect class="box src" x="16" y="34" width="180" height="56"/>
+    <text class="hd" x="30" y="57">F1 live timing feed</text>
+    <text class="lbl" x="30" y="74">SignalR · livetiming.formula1.com</text>
+
+    <rect class="box src" x="16" y="272" width="180" height="56"/>
+    <text class="hd" x="30" y="295">FastF1 historical API</text>
+    <text class="lbl" x="30" y="312">completed sessions, cached</text>
+
+    <!-- Bridge -->
+    <rect class="box hot" x="268" y="24" width="230" height="76"/>
+    <text class="hd" x="284" y="48">live_opw_bridge.py</text>
+    <text class="lbl" x="284" y="66">decode CarData.z / Position.z</text>
+    <text class="lbl" x="284" y="82">LiveState · penalty announcer</text>
+
+    <!-- Recordings -->
+    <rect class="box rec" x="278" y="156" width="210" height="52"/>
+    <text class="hd" x="294" y="178">recordings/session_*.txt</text>
+    <text class="lbl" x="294" y="196">JSONL: rt · topic · data</text>
+
+    <!-- OPW clients -->
+    <rect class="box" x="620" y="14" width="220" height="48"/>
+    <text class="hd" x="636" y="34">opw_track_map.py</text>
+    <text class="lbl" x="636" y="50">Qt circuit map + race control</text>
+
+    <rect class="box" x="620" y="76" width="220" height="48"/>
+    <text class="hd" x="636" y="96">driver-telemetry-trace</text>
+    <text class="lbl" x="636" y="112">OPW example, from submodule</text>
+
+    <!-- Terminal lane -->
+    <rect class="box" x="268" y="272" width="230" height="56"/>
+    <text class="hd" x="284" y="295">replay_past_race.py</text>
+    <text class="lbl" x="284" y="312">animates a finished session</text>
+
+    <rect class="box" x="620" y="216" width="220" height="56"/>
+    <text class="hd" x="636" y="239">pit_wall.py</text>
+    <text class="lbl" x="636" y="256">Rich TUI timing board</text>
+
+    <!-- Wires -->
+    <line x1="196" y1="62" x2="264" y2="62" marker-end="url(#arr)"/>
+
+    <path class="wire" d="M 498 46 H 560 V 38 H 616" marker-end="url(#arr)"/>
+    <path class="wire" d="M 498 78 H 560 V 100 H 616" marker-end="url(#arr)"/>
+    <text class="lbl" x="516" y="28">OPW protocol</text>
+    <text class="lbl" x="516" y="130">ws://localhost:8765</text>
+
+    <path class="wire" d="M 360 100 V 152" marker-end="url(#arr)"/>
+    <text class="lbl" x="300" y="126">--record</text>
+    <path class="wire" d="M 420 152 V 104" marker-end="url(#arr)"/>
+    <text class="lbl" x="430" y="132">--replay --speed --loop</text>
+
+    <path class="wire dash" d="M 106 90 V 244 H 660 V 212" marker-end="url(#arr)"/>
+    <text class="lbl" x="118" y="238">own SignalR client (live sessions)</text>
+
+    <line x1="196" y1="300" x2="264" y2="300" marker-end="url(#arr)"/>
+    <path class="wire dash" d="M 498 300 H 700 V 276" marker-end="url(#arr)"/>
+    <text class="lbl" x="516" y="292">imports its table builders</text>
+  </svg>
+  </div>
+  </div>
+
+  <ul class="legend">
+    <li><b>Green boxes</b> — data sources. The live feed needs F1TV auth
+    (via FastF1's internal <code>get_auth_token</code>); the historical API just needs network once, then it's cached.</li>
+    <li><b>Blue box</b> — the bridge, the heart of the repo. Everything to its right works identically whether the bridge is live or replaying a recording.</li>
+    <li><b>Amber box</b> — recordings, the offline test fixtures. Solid arrows carry live data; dashed arrows are alternative paths.</li>
+  </ul>
+
+  <h2 id="bridge">The bridge — <code>live_opw_bridge.py</code></h2>
+  <p class="sub">SignalR in, OPW WebSocket out. One process, three moving parts:
+  a data source (live client or replay), a thread-safe <code>LiveState</code>,
+  and a 10&nbsp;Hz broadcast server.</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="cap">LiveF1Client — the live source</div>
+      <div class="why">Subscribes to 13 SignalR topics (timing, weather, race control,
+      <code>CarData.z</code>, <code>Position.z</code>…). Compressed payloads are
+      base64 + raw-deflate; <code>_decode_compressed</code> inflates them to JSON.
+      Auth comes from <code>fastf1.internals.f1auth.get_auth_token</code>;
+      <code>--no-auth</code> connects anyway with partial data.</div>
+    </div>
+    <div class="card">
+      <div class="cap">LiveState — shared state + announcer</div>
+      <div class="why">Per-driver telemetry, positions, stints, weather, session info —
+      all behind one lock, snapshotted per broadcast tick. It also watches
+      <code>RaceControlMessages</code> and <code>TrackStatus</code> and turns them into
+      readable one-liners: 🚨 penalties, 💥 retirements, 🟨 safety car, 🟥 red flag.</div>
+    </div>
+    <div class="card">
+      <div class="cap">OPWServer — the broadcaster</div>
+      <div class="why">Serves <code>ws://localhost:8765</code>. Sends a
+      <code>welcome</code> message on connect; clients reply with
+      <code>{"action": "subscribe", "channels": [...]}</code>. Every 100&nbsp;ms it
+      snapshots state, builds one frame per channel, and sends each client only
+      what it subscribed to.</div>
+    </div>
+    <div class="card">
+      <div class="cap">ReplaySource — the offline source</div>
+      <div class="why">Reads a recording and pushes each message through
+      <em>the same</em> <code>route_message</code> path as live data, honouring
+      original timing scaled by <code>--speed</code>, optionally with
+      <code>--loop</code>. No auth, no network.</div>
+    </div>
+  </div>
+
+  <h3>Broadcast channels</h3>
+  <div class="tablewrap">
+    <table>
+      <tr><th>Channel</th><th>Payload</th></tr>
+      <tr><td><code>telemetry.drivers</code></td>
+          <td>Array of per-driver frames: speed, rpm, gear, throttle, brake, DRS, tyre compound, and x/y/z position (metres). Also available per driver as <code>telemetry.drivers.VER</code> etc.</td></tr>
+      <tr><td><code>leaderboard</code></td>
+          <td>Running order: position + driver code, sorted by <code>TimingData.Position</code>.</td></tr>
+      <tr><td><code>race_control</code></td>
+          <td>The latest raw race-control message plus the full list of formatted <code>announcements</code> (the emoji-tagged penalty/incident lines).</td></tr>
+      <tr><td><code>telemetry.weather</code></td>
+          <td>Track/air temperature, humidity, wind, and a DRY/WET rain state.</td></tr>
+      <tr><td><code>telemetry.lap</code></td>
+          <td>Current lap number and elapsed stream seconds.</td></tr>
+    </table>
+  </div>
+
+  <h3>Telemetry decoding cheat-sheet</h3>
+  <ul class="legend">
+    <li><b>CarData channels</b> — indices are strings: <code>"0"</code>&nbsp;rpm,
+    <code>"2"</code>&nbsp;speed, <code>"3"</code>&nbsp;gear, <code>"4"</code>&nbsp;throttle,
+    <code>"5"</code>&nbsp;brake (×100 to a percentage), <code>"45"</code>&nbsp;DRS.
+    Constants live at the top of the file — reuse them.</li>
+    <li><b>Position scale</b> — feed coordinates are 1/10&nbsp;metre
+    (<code>POSITION_SCALE = 0.1</code>). The bridge emits metres; FastF1 circuit
+    geometry stays in 1/10&nbsp;m, so the track map rescales when projecting.</li>
+    <li><b>Track status codes</b> — 1&nbsp;clear, 2&nbsp;yellow, 4&nbsp;safety car,
+    5&nbsp;red flag, 6/7&nbsp;VSC deployed/ending.</li>
+  </ul>
+
+  <div class="note" style="margin-top: 20px">
+    <b>Design rule:</b> one bad payload must never take down the feed.
+    Every message goes through <code>safe_route</code>, which logs and skips
+    malformed data. The real feed sends zeroed positions, partial payloads, and
+    mid-session reconnects — treat all of it as normal.
+  </div>
+
+  <h2 id="pitwall">Pit wall TUI — <code>pit_wall.py</code></h2>
+  <p class="sub">A Rich terminal timing board with its own SignalR client — it
+  does not use the bridge. Renders at 2&nbsp;fps from a deep-merged
+  <code>TimingState</code>. Mocked below with the Canadian GP field, lap 43.</p>
+
+  <div class="appwrap">
+  <div class="darkpane term">
+    <div class="titlebar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="tname">pit_wall.py — Open Pit Wall</div>
+    </div>
+    <div class="termbody"><span class="wh">  Canadian Grand Prix — Race</span>  <span class="cy">Lap 43/70</span>  <span class="grn">[Track Clear]</span>  <span class="dim">Air 24.3°C  Track 41.7°C</span>
+
+<span class="dim"> Pos  Drv     Gap       Int   Last Lap  Best Lap  S1       S2       S3      Tyre  Age  Pits</span>
+   1  <span class="wh">VER</span>       —         —  <span class="yel">1:15.213</span>  <span class="yel">1:14.402</span>  <span class="yel">24.101</span>   <span class="grn">28.774</span>   <span class="yel">22.338</span>   <span class="t-m">M</span>     18     1
+   2  <span class="wh">NOR</span>  <span class="dim">+1.409</span>    <span class="dim">+1.409</span>  <span class="grn">1:15.101</span>  <span class="yel">1:14.617</span>  <span class="yel">24.180</span>   <span class="yel">28.702</span>   <span class="grn">22.219</span>   <span class="t-m">M</span>     16     1
+   3  <span class="wh">PIA</span>  <span class="dim">+2.251</span>    <span class="dim">+0.842</span>  <span class="pur">1:14.118</span>  <span class="pur">1:14.118</span>  <span class="pur">23.984</span>   <span class="yel">28.911</span>   <span class="pur">21.223</span>   <span class="t-s">S</span>      6     2
+   4  <span class="wh">RUS</span>  <span class="dim">+4.621</span>    <span class="dim">+2.370</span>  <span class="yel">1:15.530</span>  <span class="yel">1:14.798</span>  <span class="yel">24.257</span>   <span class="yel">28.940</span>   <span class="yel">22.333</span>   <span class="t-h">H</span>     22     1
+   5  <span class="wh">LEC</span>  <span class="dim">+4.844</span>    <span class="dim">+0.223</span>  <span class="yel">1:15.492</span>  <span class="yel">1:14.734</span>  <span class="yel">24.301</span>   <span class="grn">28.851</span>   <span class="yel">22.340</span>   <span class="t-m">M</span>     19     1
+   6  <span class="wh">ANT</span>  <span class="dim">+8.421</span>    <span class="dim">+3.577</span>  <span class="yel">1:15.687</span>  <span class="yel">1:14.921</span>  <span class="yel">24.312</span>   <span class="yel">29.017</span>   <span class="yel">22.358</span>   <span class="t-h">H</span>     21     1
+   7  <span class="wh">HAM</span>  <span class="dim">+9.807</span>    <span class="dim">+1.386</span>  <span class="grn">1:15.322</span>  <span class="yel">1:14.850</span>  <span class="grn">24.198</span>   <span class="yel">28.995</span>   <span class="yel">22.129</span>   <span class="t-m">M</span>     17     1
+   8  <span class="wh">ALO</span><span class="org"> P</span> <span class="dim">+12.50</span>    <span class="dim">+2.693</span>  <span class="yel">1:16.004</span>  <span class="yel">1:15.113</span>  <span class="yel">24.402</span>   <span class="yel">29.230</span>   <span class="dim">---.---</span>  <span class="t-h">H</span>     24     2
+
+<span class="dim">┌─ Race Control ──────────────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span> <span class="dim">[Lap 41]</span> <span class="red">[YELLOW]</span> CAR 16 (LEC) 5 SECOND TIME PENALTY - TRACK LIMITS        <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">[Lap 40]</span> <span class="grn">[CLEAR]</span> TRACK CLEAR                                              <span class="dim">│</span>
+<span class="dim">└─────────────────────────────────────────────────────────────────────────────┘</span>
+<span class="dim"> 12:41:07  </span><span class="grn">● LIVE</span></div>
+  </div>
+  </div>
+
+  <ul class="legend">
+    <li><b>Lap-time colours</b> — feed status codes: <code>2048</code> renders purple
+    (overall fastest), <code>2049</code> green (personal best), anything else yellow.
+    Sectors use the same scheme.</li>
+    <li><b>Driver code suffixes</b> — <code>P</code> in pit, <code>O</code> out lap,
+    <code>S</code> stopped, coloured amber / cyan / red. Driver codes render in the
+    team's real <code>TeamColour</code>.</li>
+    <li><b>Race Control panel</b> — last six raw messages, newest first, flag-coloured.</li>
+    <li><b>It's also a library</b> — <code>replay_past_race.py</code> imports
+    <code>TimingState</code>, <code>build_timing_table</code>, and
+    <code>build_race_control_panel</code> to render historical data through the same
+    display. Keep those seams importable and testable.</li>
+  </ul>
+
+  <h3>Past-race animation — <code>replay_past_race.py</code></h3>
+  <p>Loads a completed session from the FastF1 API and steps the board lap by
+  lap (1.5&nbsp;s per lap, divided by <code>--speed</code>; <code>--lap N</code>
+  jumps in). It reconstructs feed-shaped snapshots from the laps DataFrame —
+  positions, lap/sector times with purple/green statuses, tyre stints, pit
+  counts, and race-control flags. Gaps are approximated from best-lap deltas,
+  which is fine for exercising the display but not real race gaps. Defaults to
+  2025 Monaco; needs network on first load, cached afterwards.</p>
+
+  <h2 id="trackmap">Track map — <code>opw_track_map.py</code></h2>
+  <p class="sub">A PySide6 window: live driver dots on the real circuit outline,
+  with the race-control announcement feed underneath. It's an OPW client — feed
+  it from the bridge (live or replay).</p>
+
+  <ul class="qs">
+    <li><b>Circuit geometry</b> comes from FastF1 telemetry of the fastest lap,
+    loaded in a background thread. Since a live race isn't in the historical API
+    yet, it falls back through candidates: requested session → same-year quali →
+    last year's race → last year's quali → two years back. The layout is identical,
+    so any hit works.</li>
+    <li><b>Positions → track dots</b> — live x/y (metres) are projected onto the
+    centreline by nearest point, giving a lap fraction the vendored
+    <code>_TrackMapWidget</code> can draw. Circular ⇄ Real&nbsp;Track toggle;
+    real view switches on automatically once geometry loads.</li>
+    <li><b>Zeroed-position guard</b> — F1TV Access streams the position feed with
+    all coordinates zeroed (GPS is gated to higher tiers). The map detects an
+    all-zero frame and shows a status note instead of collapsing every dot onto
+    the origin. Telemetry channels stay live regardless.</li>
+    <li><b>Reconnection</b> — the WebSocket client retries with backoff
+    (2&nbsp;s&nbsp;→&nbsp;×1.5&nbsp;→&nbsp;max&nbsp;15&nbsp;s), so start order
+    relative to the bridge doesn't matter.</li>
+    <li><b>Colours</b> — currently a first-come-first-served palette copied from
+    f1-race-replay. The <a href="https://claude.ai/code/artifact/a2913b24-a05c-49f5-b6f4-7ed502a98e8d">Driver
+    Tower proposal</a> would replace this with real team colours.</li>
+    <li><b>Vendored widget</b> — <code>_TrackMapWidget</code> is imported from the
+    <code>vendor/f1-race-replay</code> submodule via <code>sys.path</code>.
+    Don't edit the submodule; wrap or monkey-patch from this repo and log issues
+    in <code>vendor-issues.md</code>.</li>
+  </ul>
+
+  <h2 id="replay">Record &amp; replay</h2>
+  <p class="sub">The development loop for the whole stack: capture a live
+  session once, then drive every dashboard from the file — no auth, no network,
+  any speed.</p>
+
+  <pre><code><span class="c"># One line per feed message — relative seconds, topic, decoded payload:</span>
+{"rt": 0.0214, "topic": "TimingData", "data": {"Lines": {"1": {"Position": "3", …}}}}
+{"rt": 0.1808, "topic": "CarData.z", "data": "<span class="c">…base64+deflate blob, kept compressed…</span>"}
+
+<span class="c"># Capture (start_live.sh does this automatically, timestamped):</span>
+<span class="g">.venv/bin/python</span> live_opw_bridge.py <span class="y">--record</span> recordings/session_$(date +%Y%m%d_%H%M%S).txt
+
+<span class="c"># Replay through the identical live pipeline:</span>
+<span class="g">.venv/bin/python</span> live_opw_bridge.py <span class="y">--replay</span> recordings/session_20260726_080636.txt <span class="y">--speed</span> 10 <span class="y">--loop</span></code></pre>
+
+  <ul class="legend">
+    <li><b>Same code path as live</b> — replayed messages go through
+    <code>route_message</code> exactly like the SignalR feed, so bugs reproduce
+    faithfully. This is the intended way to verify changes (see AGENTS.md).</li>
+    <li><b>Recordings are fixtures</b> — <code>recordings/</code> is gitignored but
+    holds real captured sessions, including the pathological data (zeroed
+    positions, partial payloads) you want tests to cover. Snip representative
+    lines into <code>tests/fixtures/</code> rather than referencing full files.</li>
+    <li><b>Two formats exist</b> — the bridge writes the JSONL above.
+    <code>pit_wall.py --record</code> and the legacy <code>live_timing.py</code>
+    write FastF1's <code>str([topic, json, ts])</code> lines instead, which
+    <code>replay_session.py</code> / <code>fastf1.livetiming.LiveTimingData</code>
+    can load but the bridge's <code>--replay</code> explicitly rejects. Don't mix them.</li>
+  </ul>
+
+  <h3>Legacy one-shots</h3>
+  <p><code>live_timing.py</code> (raw FastF1 feed recorder) and
+  <code>replay_session.py</code> (loads a recording or finished session and
+  prints a fastest-laps summary) predate the bridge. They're kept as minimal
+  FastF1 examples — reach for the bridge for anything real.</p>
+
+  <h2 id="launchers">Launchers</h2>
+  <p class="sub">Each script starts a broadcaster inside a named
+  <code>screen</code> session, launches the telemetry trace and track map as
+  background processes, then <code>exec screen -r</code> — it takes over the
+  terminal. Run the Python entry points directly if you need your shell back.</p>
+
+  <div class="tablewrap">
+    <table>
+      <tr><th>Script</th><th>Screen</th><th>What it runs</th></tr>
+      <tr>
+        <td><code>start_live.sh [DRIVER] [ROUND] [YEAR]</code></td>
+        <td><code>f1live</code></td>
+        <td>Bridge in live mode, auto-recording to a timestamped file in
+        <code>recordings/</code>. Refuses to start if port 8765 is taken —
+        two bridges writing one recording corrupts it
+        (<code>lsof -iTCP:8765 -sTCP:LISTEN</code> to check).</td>
+      </tr>
+      <tr>
+        <td><code>start_replay_live.sh FILE [DRIVER] [ROUND] [YEAR] [SPEED]</code></td>
+        <td><code>f1replay</code></td>
+        <td>Bridge in <code>--replay --loop</code> mode against a recording.
+        The offline-development default. Same port guard.</td>
+      </tr>
+      <tr>
+        <td><code>start_replay.sh [DRIVER] [ROUND] [YEAR]</code></td>
+        <td><code>opw</code></td>
+        <td>OPW's own interactive broadcaster (<code>python -m open_pit_wall</code>) —
+        navigate its menu, then <code>play</code>. Uses OPW's saved-data format,
+        not this repo's recordings.</td>
+      </tr>
+    </table>
+  </div>
+
+  <p style="margin-top: 14px">Defaults are
+  <code>VER Monaco 2026</code>. Drivers are three-letter codes; rounds are FastF1
+  event names ("Monaco", "Canadian Grand Prix"). Detach with
+  <code>Ctrl-A D</code>, reattach with <code>screen -r f1live</code>.</p>
+
+  <h2 id="docker">Docker</h2>
+  <p class="sub">Headless variants of the same stack. <code>docker compose up
+  &lt;service&gt;</code>; the FastF1 cache lives in the <code>f1cache</code>
+  volume and <code>./recordings</code> is bind-mounted.</p>
+
+  <div class="tablewrap">
+    <table>
+      <tr><th>Service</th><th>Port</th><th>What it is</th></tr>
+      <tr><td><code>bridge</code></td><td>8765</td>
+          <td>The live bridge, recording to <code>recordings/live_session.txt</code>. Point dashboards on the host at it.</td></tr>
+      <tr><td><code>pitwall</code></td><td>—</td>
+          <td>The terminal timing board, attached via <code>docker attach</code> / compose TTY.</td></tr>
+      <tr><td><code>replay</code></td><td>—</td>
+          <td>OPW's interactive replay broadcaster.</td></tr>
+      <tr><td><code>web-pitwall</code></td><td>7681</td>
+          <td>The timing board in a browser via ttyd (xterm.js), writable.</td></tr>
+      <tr><td><code>web-replay</code></td><td>7682</td>
+          <td>The OPW broadcaster TUI in a browser via ttyd.</td></tr>
+      <tr><td><code>trackmap</code></td><td>—</td>
+          <td>The Qt map via X11 forwarding — XQuartz + <code>xhost +localhost</code> on macOS, <code>DISPLAY=$DISPLAY</code> on Linux.</td></tr>
+    </table>
+  </div>
+
+  <div class="note warn" style="margin-top: 20px">
+    <b>No auth on the web TUIs.</b> ttyd serves ports 7681/7682 writable with no
+    login and no TLS — they're meant to sit behind a reverse proxy
+    (Caddy, nginx, Cloudflare Tunnel) that provides both. Don't expose them raw.
+  </div>
+
+  <h2 id="conventions">Working on the repo</h2>
+  <p class="sub">The short version of AGENTS.md — the conventions that actually
+  bite.</p>
+
+  <ul class="qs">
+    <li><b>Setup</b> — <code>./setup.sh</code> once: inits the submodules, creates
+    <code>.venv</code>, installs <code>requirements.txt</code> plus OPW as an
+    editable install. Always use <code>.venv/bin/python</code>; there is no
+    activation step, and the <code>env/</code> directory is a stale second venv —
+    ignore it.</li>
+    <li><b>Verify with a replay</b> — after any change, run the bridge against the
+    newest recording at <code>--speed 10</code> and start the component you touched.
+    That's the point of record/replay; don't wait for a live session.</li>
+    <li><b>Tests</b> — there's no suite yet, but new work should add one:
+    <code>pytest</code> under <code>tests/</code>. The testable seams are the pure
+    layers — payload decoding, OPW frame building, and
+    <code>pit_wall.py</code>'s state/table builders — not the TUIs or Qt apps.</li>
+    <li><b>Vendor submodules are read-only</b> — <code>vendor/open-pit-wall</code>
+    and <code>vendor/f1-race-replay</code> track upstream. Wrap or monkey-patch
+    from this repo's code, and log suspected upstream bugs in
+    <code>vendor-issues.md</code> with a repro against a named recording.</li>
+    <li><b>Live-feed data is defensive territory</b> — zeroed positions, partial
+    payloads, reconnects. Handle missing data gracefully and surface a note in
+    the UI rather than crashing.</li>
+    <li><b>Git</b> — plain imperative one-line commit messages describing
+    user-visible behaviour; work directly on <code>main</code>; never commit
+    <code>recordings/</code>, caches, or venvs.</li>
+  </ul>
+</main>
+</body>
+</html>
