@@ -180,6 +180,13 @@ def describe_race_control_event(msg: dict, driver_info: dict) -> str | None:
     return None
 
 
+def _as_bool(value) -> bool:
+    """Feed booleans arrive as true/false, 'true'/'false', or 0/1."""
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return bool(value)
+
+
 # ---------------------------------------------------------------------------
 # Shared live state
 # ---------------------------------------------------------------------------
@@ -198,6 +205,12 @@ class LiveState:
 
         # driver_number -> position in race (int)
         self.positions: dict[str, int] = {}
+
+        # driver_number -> merged timing state (gaps, pit, retired, ...)
+        self.timing: dict[str, dict] = {}
+
+        # driver_number currently holding the fastest lap of the session
+        self.fastest_lap_driver: str | None = None
 
         # session-level info
         self.session_info: dict = {}
@@ -261,10 +274,34 @@ class LiveState:
     def apply_timing_data(self, data: dict):
         with self._lock:
             for num, t in data.get("Lines", {}).items():
-                if isinstance(t, dict):
-                    pos = t.get("Position")
-                    if pos:
-                        self.positions[num] = int(pos)
+                if not isinstance(t, dict):
+                    continue
+                pos = t.get("Position")
+                if pos:
+                    self.positions[num] = int(pos)
+
+                # TimingData arrives as deltas — merge only the keys present.
+                tim = self.timing.setdefault(num, {})
+                if "GapToLeader" in t:
+                    tim["gap_to_leader"] = str(t["GapToLeader"] or "")
+                interval = t.get("IntervalToPositionAhead")
+                if isinstance(interval, dict):
+                    if "Value" in interval:
+                        tim["interval"] = str(interval["Value"] or "")
+                    if "Catching" in interval:
+                        tim["catching"] = _as_bool(interval["Catching"])
+                for src, dst in (("InPit", "in_pit"), ("PitOut", "pit_out"),
+                                 ("Retired", "retired"), ("Stopped", "stopped")):
+                    if src in t:
+                        tim[dst] = _as_bool(t[src])
+                if "NumberOfPitStops" in t:
+                    try:
+                        tim["pit_stops"] = int(t["NumberOfPitStops"])
+                    except (TypeError, ValueError):
+                        pass
+                last = t.get("LastLapTime")
+                if isinstance(last, dict) and _as_bool(last.get("OverallFastest")):
+                    self.fastest_lap_driver = num
 
     def apply_timing_app(self, data: dict):
         lines = data.get("Lines", {})
@@ -350,6 +387,8 @@ class LiveState:
                 "driver_info": {k: dict(v) for k, v in self.driver_info.items()},
                 "stints": {k: dict(v) for k, v in self.stints.items()},
                 "positions": dict(self.positions),
+                "timing": {k: dict(v) for k, v in self.timing.items()},
+                "fastest_lap_driver": self.fastest_lap_driver,
                 "session_info": dict(self.session_info),
                 "lap_count": dict(self.lap_count),
                 "weather": dict(self.weather),
@@ -623,15 +662,40 @@ def _build_driver_payload(num: str, snap: dict) -> dict | None:
 def _build_leaderboard(snap: dict) -> list[dict]:
     positions = snap["positions"]
     driver_info = snap["driver_info"]
+    timing = snap["timing"]
+    stints = snap["stints"]
+    fastest = snap["fastest_lap_driver"]
     sorted_drivers = sorted(positions.items(), key=lambda kv: kv[1])
-    return [
-        {
+
+    board = []
+    for num, pos in sorted_drivers:
+        info = driver_info.get(num, {})
+        tim = timing.get(num, {})
+        stint = stints.get(num, {})
+        compound = TYRE_COMPOUND_MAP.get(
+            str(stint.get("Compound", "")).upper(), "UNKNOWN"
+        )
+        try:
+            tyre_age = int(stint.get("TotalLaps", 0))
+        except (TypeError, ValueError):
+            tyre_age = 0
+        board.append({
             "position": pos,
-            "driver_code": driver_info.get(num, {}).get("Tla", num),
+            "driver_code": info.get("Tla", num),
             "dist_metres_from_leader": 0.0,
-        }
-        for num, pos in sorted_drivers
-    ]
+            "team_colour": str(info.get("TeamColour", "") or ""),
+            "gap_to_leader": tim.get("gap_to_leader", ""),
+            "interval": tim.get("interval", ""),
+            "catching": bool(tim.get("catching", False)),
+            "in_pit": bool(tim.get("in_pit", False)),
+            "pit_out": bool(tim.get("pit_out", False)),
+            "retired": bool(tim.get("retired") or tim.get("stopped")),
+            "pit_stops": int(tim.get("pit_stops", 0)),
+            "tyre": compound,
+            "tyre_age": tyre_age,
+            "fastest_lap": num == fastest,
+        })
+    return board
 
 
 def _build_weather(snap: dict) -> dict | None:
